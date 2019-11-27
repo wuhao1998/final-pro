@@ -1,0 +1,800 @@
+/*	Author: hwu901
+ *  Partner(s) Name: 
+ *	Lab Section:
+ *	Assignment: Lab #  Exercise #
+ *	Exercise Description: [optional - include for your own benefit]
+ *
+ *	I acknowledge all content contained herein, excluding template or example
+ *	code, is my own original work.
+ */
+#include <stdio.h>
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include"io.c"
+#include"io.h"
+#include "ADC_H.h"
+#include "ADC_C.c"
+#include <avr/eeprom.h>
+#define A0 (PINA & 0x01)
+#define A1 (PINA & 0x02)
+#define A2 (PINA & 0x04)
+#define A3 (PINA & 0x08)
+#define A4 (PINA & 0x10)
+#define A5 (PINA & 0x20)
+#define A6 (~PINB & 0x01)
+#define A7 (~PINB & 0x02)
+
+
+
+volatile unsigned char TimerFlag = 0;
+unsigned long _avr_timer_M = 1;
+unsigned long _avr_timer_cntcurr = 0;
+
+void TimerOn(){
+	TCCR1B = 0x0B;
+	OCR1A = 125;
+	TIMSK1 = 0x02;
+	TCNT1 = 0;
+	
+	_avr_timer_cntcurr = _avr_timer_M;
+	SREG |= 0x80;
+}
+
+void TimerOff(){
+	TCCR1B = 0x00;
+}
+
+void TimerISR(){
+	TimerFlag = 1;
+}
+
+ISR(TIMER1_COMPA_vect) {
+	_avr_timer_cntcurr--;
+	if (_avr_timer_cntcurr == 0) {
+		TimerISR();
+		_avr_timer_cntcurr = _avr_timer_M;
+	}
+}
+
+void TimerSet(unsigned long M) {
+	_avr_timer_M = M;
+	_avr_timer_cntcurr = _avr_timer_M;
+}
+
+void set_PWM(double frequency) {
+	static double current_frequency; // Keeps track of the currently set frequency
+	
+	// Will only update the registers when the frequency changes, otherwise allows
+	// music to play uninterrupted.
+	if (frequency != current_frequency) {
+		if (!frequency) { TCCR3B &= 0x08; } //stops timer/counter
+
+		else { TCCR3B |= 0x03; } // resumes/continues timer/counter
+		// prevents OCR3A from overflowing, using prescaler 64
+		// 0.954 is smallest frequency that will not result in overflow
+		if (frequency < 0.954) { OCR3A = 0xFFFF; }
+		// prevents OCR0A from underflowing, using prescaler 64     // 31250 is largest frequency that will not result in underflow
+		
+		else if (frequency > 31250) { OCR3A = 0x0000; }
+
+		// set OCR3A based on desired frequency
+		else { OCR3A = (short)(8000000 / (128 * frequency)) - 1; }
+		
+		TCNT3 = 0; // resets counter
+		current_frequency = frequency; // Updates the current frequency
+	}
+}
+
+void PWM_on() {
+	TCCR3A = (1 << COM3A0);
+	// COM3A0: Toggle PB3 on compare match between counter and OCR0A
+	TCCR3B = (1 << WGM32) | (1 << CS31) | (1 << CS30);
+	// WGM02: When counter (TCNT0) matches OCR0A, reset counter
+	// CS01 & CS30: Set a prescaler of 64
+	set_PWM(0);
+}
+
+void PWM_off() {
+	TCCR3A = 0x00;
+	TCCR3B = 0x00;
+}
+
+enum Game_States{Game_init, Game_menu, Game_menu1, Game_wait, Game_on, Game_on1, Game_off,Game_off1, Game_endsong, Game_endsong1, Game_wait2, Game_win} Game_state;
+
+// twinkle twinkle little star, how I wonder what you are.
+//G, G, D, D, E, E, D, C, C, B, B, A, A, G
+//int button[14]= {A1, A1, A5, A5, A6, A6, A5, A4, A4, A3, A3, A2, A2, A1};
+int notes[42] = {493, 493, 493, 523, 587, 493, 440, 392, 392, 392, 440, 493, 440, 392, 493, 493, 523, 587, 587, 523, 493, 440, 392, 392, 440, 493, 440, 392 , 392, 587, 587, 493, 440, 493, 587, 440, 493, 587, 493, 440};
+unsigned short timeHeld[42] = {25, 12, 12, 25, 25, 50, 50, 25, 12, 12, 25, 25, 50, 50, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 50, 25, 25, 25, 25, 50};
+unsigned short timeBetween[20] = {3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,3, 3,3 ,3,3,3};
+
+int notes1[50] = {392, 392, 587, 587, 659, 659, 587, 523, 523, 493, 493, 440, 440, 392, 440, 587, 587, 698, 784, 698, 659, 587, 659, 698, 698, 698 ,698, 659, 698, 659, 587, 493, 493, 523, 587, 587, 523, 493, 440, 392, 392, 440, 493, 440, 392 , 392};
+unsigned short timeHeld1[50] = {25, 25, 25, 25, 25, 25, 50, 25, 25, 25, 25, 25, 25, 50, 25, 25 , 25 , 25 , 25 , 25 , 25 , 12 ,12, 25, 25 , 25 , 25, 12, 12, 25, 25,25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25};
+
+
+unsigned char input;
+unsigned char n;	// index for notes
+unsigned char m;
+unsigned char i;	// tick counter
+int ADC_Value;
+
+static unsigned char j=0;
+unsigned flag1;
+unsigned flag = 0;
+unsigned flagmenu = 0;
+unsigned flagmenu1 ;
+unsigned char counter;	// counter2 for finish
+unsigned char  a[42]= {0x04, 0x04, 0x04, 0x08, 0x10 , 0x04, 0x02, 0x01, 0x01, 0x01, 0x02, 0x04, 0x02, 0x01, 0x04, 0x04, 0x08, 0x10, 0x10, 0x08, 0x04, 0x02, 0x01, 0x01, 0x02, 0x04, 0x02, 0x01, 0x01, 0x10, 0x10, 0x04, 0x02, 0x04, 0x10, 0x02, 0x04, 0x10, 0x04, 0x02 };
+
+void customLCD()//custom character
+{
+	char i;
+	//Custom character dictionary
+	unsigned char Character1[8] = { 0x00, 0x0A, 0x15, 0x11, 0x0A, 0x04, 0x00, 0x00 };  /* Custom char set for alphanumeric LCD Module */                                
+	unsigned char Character2[8] = { 0x04, 0x1F, 0x11, 0x11, 0x1F, 0x1F, 0x1F, 0x1F };  
+	unsigned char Character3[8] = { 0x04, 0x0E, 0x0E, 0x0E, 0x1F, 0x00, 0x04, 0x00 };
+	unsigned char Character4[8] = { 0x01, 0x03, 0x07, 0x1F, 0x1F, 0x07, 0x03, 0x01 };
+	unsigned char Character5[8] = { 0x01, 0x03, 0x05, 0x09, 0x09, 0x0B, 0x1B, 0x18 };
+	unsigned char Character6[8] = { 0x0A, 0x0A, 0x1F, 0x11, 0x11, 0x0E, 0x04, 0x04 };
+	unsigned char Character7[8] = { 0x00, 0x00, 0x0A, 0x00, 0x04, 0x11, 0x0E, 0x00 };
+	unsigned char Character8[8] = { 0x00, 0x0A, 0x1F, 0x1F, 0x0E, 0x04, 0x00, 0x00 };
+
+	LCD_Init();
+	
+	LCD_Custom_Char(0, Character1);  /* Build Character1 at position 0 */
+	LCD_Custom_Char(1, Character2);  /* Build Character2 at position 1 */
+	LCD_Custom_Char(2, Character2);  /* Build Character3 at position 2 */ //changed to undefined 
+	LCD_Custom_Char(3, Character2);  /* Build Character4 at position 3 */ //changed to undefined
+	LCD_Custom_Char(4, Character5);  /* Build Character5 at position 4 */
+	LCD_Custom_Char(5, Character6);  /* Build Character6 at position 5 */
+	LCD_Custom_Char(6, Character7);  /* Build Character6 at position 6 */
+	LCD_Custom_Char(7, Character8);  /* Build Character6 at position 7 */
+}
+
+void Game_tick(){
+  
+ 
+	unsigned char tmpA = PINA;
+	switch(Game_state){
+		case Game_init:
+		flag1 = 0;
+		Game_state = Game_menu;
+		break;
+		
+	        case Game_menu:
+		  ADC_Value = ADC_Read(0);/* Read the status on X-OUT pin using channel 0 */
+		  ADC_Value = ADC_Read(1);/* Read the status on Y-OUT pin using channel 0 */
+		  if(ADC_Value<1){
+		    LCD_Clear();
+		    LCD_Cursor(1);
+		    LCD_Char(4);
+		    flagmenu=0;
+		   
+		}
+		  else if(ADC_Value>100){
+		    LCD_Clear();
+		    LCD_Cursor(17);
+		    LCD_Char(4);
+		    flagmenu = 1;
+		}
+		  if(A6){
+		    if(flagmenu == 1){
+		      flag1 =1;
+		       Game_state = Game_wait;
+		    }
+		    else{
+		      Game_state = Game_menu1;
+		       LCD_Clear();
+		       //    LCD_String("Enjoy the Music");
+		       //    LCD_Char(4);
+		    }
+		  }
+		  
+		  break;
+		
+	        case Game_menu1:
+		  ADC_Value = ADC_Read(0);/* Read the status on X-OUT pin using channel 0 */
+		  
+		  if(ADC_Value<1){
+		    LCD_Clear();
+		    LCD_Cursor(1);
+		    LCD_Char(4);
+		    flagmenu1 = 0;
+		   
+		}
+		  else if(ADC_Value>100){
+		    LCD_Clear();
+		    LCD_Cursor(5);
+		    LCD_Char(4);
+		    flagmenu1 = 1;
+		}
+		   
+		  ADC_Value = ADC_Read(1);
+		   if(ADC_Value<1){
+		    LCD_Clear();
+		    LCD_Cursor(1);
+		    LCD_Char(4);
+		    flagmenu1 = 0;
+		   
+		}
+		  else if(ADC_Value>100){
+		    LCD_Clear();
+		    LCD_Cursor(17);
+		    LCD_Char(4);
+		    flagmenu1 = 2;
+		}
+		   if(A7){
+		     
+		      LCD_Clear();
+		      LCD_String("Enjoy the Music");
+		      LCD_Char(4);
+		     Game_state = Game_on1;}
+		   break;
+		   
+	        case Game_on1:
+		  if(flagmenu1 == 0){
+		  if(i <= timeHeld1[n]){
+		      Game_state = Game_on1;
+		}
+		    else if(i > timeHeld1[n]){
+		      counter++;
+		      if(counter > 13){
+			Game_state = Game_endsong1;
+
+		      }
+		      else{
+			Game_state = Game_off1;
+
+			i = 0;
+		      }
+		    }
+		  }
+		  else if(flagmenu1 == 1){
+		  if(i <= timeHeld1[n+14]){
+		      Game_state = Game_on1;
+		}
+		    else if(i > timeHeld1[n+14]){
+		      counter++;
+		      if(counter > 16){
+			Game_state = Game_endsong1;
+
+		      }
+		      else{
+			Game_state = Game_off1;
+
+			i = 0;
+		      }
+		    }
+		  }
+		  else if(flagmenu1 == 2){
+		  if(i <= timeHeld1[n+31]){
+		      Game_state = Game_on1;
+		}
+		    else if(i > timeHeld1[n+31]){
+		      counter++;
+		      if(counter > 14){
+			Game_state = Game_endsong1;
+
+		      }
+		      else{
+			Game_state = Game_off1;
+
+			i = 0;
+		      }
+		    }
+		  }
+		  break;
+		 
+	        case Game_off1:
+		  if(i <= timeBetween[counter]){
+			Game_state = Game_off1;
+		}
+		else if(i > timeBetween[counter]){
+			Game_state = Game_on1;
+			n++;
+			i = 0;
+		}
+		  break;
+		  
+	       case Game_endsong1:
+		 Game_state = Game_init;
+		 break;
+		   
+		case Game_wait:
+		  LCD_String("Push ButtonTo Start");
+		  LCD_Char(4);   
+		if(A6){
+			Game_state = Game_on;
+			LCD_Clear();
+			LCD_String("Memorize Notes");
+			LCD_Char(2);
+			if(j<14){
+			   LCD_Cursor(17);
+			   LCD_Char('1');
+			   LCD_Cursor(18);
+			   LCD_Char('4');
+			}
+			else if(j>=14 && j<29){
+			   LCD_Cursor(17);
+			   LCD_Char('2');
+			   LCD_Cursor(18);
+			   LCD_Char('9');
+			}
+			else if(j>=29 && j<40){
+			  LCD_Cursor(17);
+			   LCD_Char('4');
+			   LCD_Cursor(18);
+			   LCD_Char('0');
+			}
+		}
+		else{
+			Game_state = Game_wait;
+		}
+		break;
+		
+		case Game_on:
+		  if(j>=0 && j<14){
+		    if(i <= timeHeld[n]){
+		      Game_state = Game_on;
+		}
+		    else if(i > timeHeld[n]){
+		      counter++;
+		      if(counter > 13){
+			Game_state = Game_endsong;
+
+		      }
+		      else{
+			Game_state = Game_off;
+
+			i = 0;
+		      }
+		    }
+		  }
+		   if(j>=14 && j<29){
+		    if(i <= timeHeld[n+14]){
+		      Game_state = Game_on;
+		    }
+		    else if(i > timeHeld[n+14]){
+		      counter++;
+		      if(counter > 14){
+			Game_state = Game_endsong;
+
+		      }
+		      else{
+			Game_state = Game_off;
+
+			i = 0;
+		      }
+		    }
+		  }
+		   
+		   if(j >= 29 && j<40){
+		    if(i <= timeHeld[n+29]){
+		      Game_state = Game_on;
+		    }
+		    else if(i > timeHeld[n+29]){
+		      counter++;
+		      if(counter > 10){
+			Game_state = Game_endsong;
+
+		      }
+		      else{
+			Game_state = Game_off;
+
+			i = 0;
+		      }
+		    }
+		  }
+		break;
+		
+		case Game_off:
+		if(i <= timeBetween[counter]){
+			Game_state = Game_off;
+		}
+		else if(i > timeBetween[counter]){
+			Game_state = Game_on;
+			n++;
+			i = 0;
+		}
+		break;
+		
+		case Game_endsong:
+		  LCD_Clear();
+		  LCD_String("Repeat the Notes");
+		  LCD_Command(0xc0);
+		  LCD_Char(3);
+		  if(j<14){
+		    LCD_Char('1');}
+		  else if(j>=14 && j<29){
+		    LCD_Char('2');}
+		  else if(j>=29 && j<40){
+		    LCD_Char('3');}
+		Game_state = Game_wait2;
+		break;
+		
+	        case Game_wait2:
+		  if(!A6){
+		    if(j!=40){
+		      Game_state = Game_wait2;
+		      flag = 1;
+			//	if(tmpA == a[j]){
+			// j++;
+			//  delay_ms(100);
+			//	}
+			//	else{
+			//  j=0;
+			//	}
+			// LCD_Cursor(30);
+			// LCD_WriteData('0'+j/10);
+			// LCD_Cursor(31);
+			// LCD_WriteData('0'+j%10);
+	    
+		  }
+		    else{
+		      LCD_Clear();
+		      LCD_String("YOU WIN");
+		      LCD_Char(7);
+		   
+		      Game_state = Game_win;
+		      break;
+		    }
+
+		  }
+		
+		  else{   
+		    Game_state = Game_wait;
+		  }
+		  break;
+		
+	        case Game_win:
+		   
+		   if(A0){
+		     Game_state = Game_init;
+		   }
+		   break;
+		     
+		default:
+		break;
+	}
+	
+	switch(Game_state){
+		case Game_init:
+		  LCD_Clear();
+		  n=0;
+		  i=0;
+		  counter = 0;
+		  j=0;
+		  break;
+		
+	        case Game_menu:
+		  LCD_String_xy(0, 1, "AUDIO PLAY");
+		  LCD_String_xy(1, 1, "GAME MODE");
+		  break;
+
+		case Game_wait:
+		flag = 0;  
+		n = 0;
+		i = 0;
+		
+		counter = 0;
+		break;
+		
+	       case Game_menu1:
+		 LCD_Cursor(2);
+		 LCD_Char(0);
+		 LCD_Cursor(6);
+		 LCD_Char(7);
+		 LCD_Cursor(18);
+		 LCD_Char(6);
+		 break;
+
+	       case Game_on1:
+		 if(flagmenu1 == 0){
+		 set_PWM(notes1[n]);	//index++ every timeHeld
+		 
+		 }
+		    else if(flagmenu1 == 1){
+		       set_PWM(notes1[n+14]);	//index++ every timeHeld
+		   
+		  }
+		  else if(flagmenu1 == 2){
+		       set_PWM(notes1[n+31]);	//index++ every timeHeld
+		   
+		      
+		  }
+		    i++;
+		    break;
+		    
+	        case Game_off1:
+		  set_PWM(0);
+		  PORTD &= 0x80;
+		  i++;
+		  break;
+		
+	        case Game_endsong1:
+		  set_PWM(0);
+		  PORTD &= 0x80;
+		  break;
+
+		case Game_on:
+		 
+		  if(j>=0 && j<14){
+		    set_PWM(notes[n]);	//index++ every timeHeld
+		    switch(notes[n]){
+		    case 392:
+		      PORTD |= (1);
+		      break;
+		    case 440:
+		      PORTD |= (1<<1);
+		      break;
+		    case 493:
+		      PORTD |= (1<<2);
+		      break;
+		    case 523:
+		      PORTD |= (1<<3);
+		      break;
+		    case 587:
+		      PORTD |= (1<<4);
+		      break;
+		    case 659:
+		      PORTD |= (1<<5);
+		      break;
+		    }
+		  }
+		  if(j>=14 && j<29){
+		    set_PWM(notes[n+14]);	//index++ every timeHeld
+		    switch(notes[n+14]){
+		    case 392:
+		      PORTD |= (1);
+		      break;
+		    case 440:
+		      PORTD |= (1<<1);
+		      break;
+		    case 493:
+		      PORTD |= (1<<2);
+		      break;
+		    case 523:
+		      PORTD |= (1<<3);
+		      break;
+		    case 587:
+		      PORTD |= (1<<4);
+		      break;
+		    case 659:
+		      PORTD |= (1<<5);
+		      break;
+		    }
+		  }
+		  
+		   if(j>=29 && j<40){
+		    set_PWM(notes[n+29]);	//index++ every timeHeld
+		    switch(notes[n+29]){
+		    case 392:
+		      PORTD |= (1);
+		      break;
+		    case 440:
+		      PORTD |= (1<<1);
+		      break;
+		    case 493:
+		      PORTD |= (1<<2);
+		      break;
+		    case 523:
+		      PORTD |= (1<<3);
+		      break;
+		    case 587:
+		      PORTD |= (1<<4);
+		      break;
+		    case 659:
+		      PORTD |= (1<<5);
+		      break;
+		    }
+		  }
+
+		  i++;
+		  break;
+		
+		case Game_off:
+		  
+		set_PWM(0);
+		PORTD &= 0x80;
+		i++;
+		break;
+		
+		case Game_endsong:
+		set_PWM(0);
+		PORTD &= 0x80;
+		break;
+		
+		case Game_wait2:
+		  if (A0) {
+			set_PWM(392);
+		}
+		else if (A1) {
+			set_PWM(440);
+		}
+		else if (A2) {
+			set_PWM(493);
+			
+		}
+               	else if (A3) {
+			set_PWM(523);
+		}
+		else if (A4) {
+			set_PWM(587);
+			
+		}
+             	else if (A5) {
+			set_PWM(659);
+		}
+		else {
+			set_PWM(0);//do nothing
+		}
+		break;
+	case Game_win:
+	  set_PWM(0);
+	  
+	  break;
+	  
+	}
+}
+static unsigned long highest; 
+static unsigned char y;
+enum check_states{ check_init, check_on}check_state;
+void check_tick(){
+  
+ 
+	unsigned char tmpA = PINA;
+	switch(check_state){
+		case check_init:
+
+		
+		  
+		  
+		check_state = check_on;
+		break;
+		
+		
+		case check_on:
+		  highest = eeprom_read_byte((uint8_t*)2);
+		  if(tmpA != 0x00 ){
+		  check_state = check_on;
+		  if(flag ==1){
+		    if(tmpA == (a[j])){
+		    j++;
+			}
+		  
+		    else{
+		      if(j<14) j=0;
+		      else if(j>=14 && j<29) j=14;
+		      else if(j>=29 && j<40) j=29;
+		     }
+		   }
+		 } 
+
+		  
+		  
+		  if((255-j)<(highest)){
+		    highest--;
+		    eeprom_write_byte((uint8_t*)2,highest);
+		    
+		  }
+		    
+		  //  highest = eeprom_read_byte((uint8_t*)2);
+		  
+		  if(flag1 == 1){
+		   LCD_Cursor(27);
+		   LCD_Char('S');
+		   LCD_Cursor(28);
+		   LCD_Char('0'+j/10);
+		   LCD_Cursor(29);
+		   LCD_Char('0'+j%10);
+		   
+		  
+		   LCD_Cursor(30);
+		   LCD_Char('H');
+		   LCD_Cursor(31);
+		   LCD_Char('0'+(255-highest)/10);
+		   LCD_Cursor(32);
+		   LCD_Char('0'+(255-highest)%10);
+		  }   
+		  
+		break;
+		
+		default:
+		break;
+	}
+	
+}
+
+
+int init()
+{
+	char i;
+	
+	unsigned char Character1[8] = { 0x00, 0x0A, 0x15, 0x11, 0x0A, 0x04, 0x00, 0x00 };  /* Custom char set for alphanumeric LCD Module */                                
+	unsigned char Character2[8] = { 0x04, 0x1F, 0x11, 0x11, 0x1F, 0x1F, 0x1F, 0x1F };  
+	unsigned char Character3[8] = { 0x04, 0x0E, 0x0E, 0x0E, 0x1F, 0x00, 0x04, 0x00 };
+	unsigned char Character4[8] = { 0x01, 0x03, 0x07, 0x1F, 0x1F, 0x07, 0x03, 0x01 };
+	unsigned char Character5[8] = { 0x01, 0x03, 0x05, 0x09, 0x09, 0x0B, 0x1B, 0x18 };
+	unsigned char Character6[8] = { 0x0A, 0x0A, 0x1F, 0x11, 0x11, 0x0E, 0x04, 0x04 };
+	unsigned char Character7[8] = { 0x00, 0x00, 0x0A, 0x00, 0x04, 0x11, 0x0E, 0x00 };
+	unsigned char Character8[8] = { 0x00, 0x0A, 0x1F, 0x1F, 0x0E, 0x04, 0x00, 0x00 };
+
+	LCD_Init();
+	
+	
+	LCD_Custom_Char(0, Character1);  /* Build Character1 at position 0 */
+	LCD_Custom_Char(1, Character2);  /* Build Character2 at position 1 */
+	LCD_Custom_Char(2, Character3);  /* Build Character3 at position 2 */
+	LCD_Custom_Char(3, Character4);  /* Build Character4 at position 3 */
+	LCD_Custom_Char(4, Character5);  /* Build Character5 at position 4 */
+	LCD_Custom_Char(5, Character6);  /* Build Character6 at position 5 */
+	LCD_Custom_Char(6, Character7);  /* Build Character6 at position 6 */
+	LCD_Custom_Char(7, Character8);  /* Build Character6 at position 7 */
+
+	LCD_Command(0x80);		/*cursor at home position */
+	LCD_String("Custom char LCD");
+	LCD_Command(0xc0);
+	
+	for(i=0;i<8;i++)		/* function will send data 1 to 8 to lcd */
+	{
+		LCD_Char(i);		/* char at 'i'th position will display on lcd */
+		LCD_Char(' ');		/* space between each custom char. */
+	}
+
+}
+
+
+
+int main(void)
+{
+  unsigned long Game_elapsedTime = 0;
+  unsigned long check_elapsedTime = 0;
+  const unsigned long timerPeriod = 10; 
+  
+	
+  ADC_Init();		/* Initialize ADC */
+
+	DDRA = 0x00; PORTA = 0x00;
+	DDRB = 0xFC; PORTB = 0x03;
+	DDRC = 0xFF; PORTC = 0x00; 
+	DDRD = 0xFF; PORTD = 0x00;
+	
+	Game_state = Game_init;
+       	check_state = check_init;
+	LCD_Init();
+	init();
+	LCD_Clear();
+	TimerSet(10);
+	TimerOn();
+	
+	PWM_on();
+
+	
+	while (1)
+	  {
+        
+	    
+	    if (Game_elapsedTime >= 10) {
+
+	      Game_tick();
+
+	      Game_elapsedTime = 0;
+
+	    }
+	    
+	    if (check_elapsedTime >= 300) {
+
+	      check_tick();
+
+	      check_elapsedTime = 0;
+	      }
+	    
+ 
+	    
+      while (!TimerFlag);
+      TimerFlag = 0;
+      Game_elapsedTime += timerPeriod;
+       check_elapsedTime += timerPeriod;
+	  }
+	return 1;
+}
